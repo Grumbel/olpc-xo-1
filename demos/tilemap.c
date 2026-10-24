@@ -485,6 +485,13 @@ static void run_blit(void)
                                          XRenderFindStandardFormat(dpy, PictStandardARGB32), 0, NULL);
     Pixmap back = direct ? win : XCreatePixmap(dpy, root, (unsigned)W, (unsigned)H, 16);
     Picture bpict = XRenderCreatePicture(dpy, back, f16, 0, NULL);
+    /* Warm-up: the atlases were filled with XPutImage, so they start in system
+     * memory, and EXA does small blits from them in software until large
+     * accelerated operations have moved them into video memory. */
+    for (int i = 0; i < 200; i++) {
+        XCopyArea(dpy, ctx.atlas, ctx.ring, gc, 0, 0, NT * T, T, 0, 0);
+        XRenderComposite(dpy, PictOpOver, spict, None, bpict, 0, 0, 0, 0, 0, 0, NK * S, S);
+    }
 
     double fieldw = W + 2 * S, fieldh = H + 2 * S;
     Stats st = {0};

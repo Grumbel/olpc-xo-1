@@ -167,6 +167,8 @@
           $(xo-pkg-config --cflags --libs sdl) -lm
         xo-cc -O2 -Wall -Wextra -o $out/bin/tilemap tilemap.c \
           $(xo-pkg-config --cflags --libs x11 xext xv xrender) -lm
+        xo-cc -O2 -Wall -Wextra -o $out/bin/blit-bench blit-bench.c \
+          $(xo-pkg-config --cflags --libs x11 xrender)
       '';
     in
     {

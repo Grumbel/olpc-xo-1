@@ -364,7 +364,16 @@ static void setup(void)
         scene_pict = XRenderCreatePicture(dpy, scene, f16, 0, NULL);
         win_pict = XRenderCreatePicture(dpy, win, f16, 0, NULL);
     }
-    XSync(dpy, False);
+    /* Warm-up: pixmaps filled with XPutImage start in system memory, and EXA
+     * does small operations from them in software until large accelerated
+     * operations have moved them into video memory. */
+    for (int i = 0; i < 200; i++) {
+        XCopyArea(dpy, atlas, back, gc, 0, 0, NKINDS * SPR, SPR, 0, 0);
+        if (have_render)
+            XRenderComposite(dpy, PictOpOver, atlas_pict, None, back_pict, 0, 0, 0, 0, 0, 0,
+                             NKINDS * SPR, SPR);
+    }
+    finish();
 }
 
 static int wanted(int argc, char **argv, int first, const char *name)

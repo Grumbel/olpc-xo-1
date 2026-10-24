@@ -18,7 +18,7 @@ cross-compile, and benchmark results.
 | `tools/gen-sysroot-lock.py` | Resolves `lock.json` from Fedora 18 / OLPC repo metadata |
 | `tools/update-sysroot-lock.sh` | Regenerates `xo-installed.tsv` (from an XO) and `lock.json` |
 | `tests/` | Toolchain smoke tests (C, C++, SDL 1.2, GTK 3) |
-| `demos/` | `x11-accel`, `sdl-accel`, `tilemap`: acceleration benchmarks and demos |
+| `demos/` | `x11-accel`, `sdl-accel`, `tilemap`, `blit-bench`: acceleration benchmarks and demos |
 | `XO-ORANGE.md` | **Private, git-ignored**: the specific unit's hostname, serial, network, state |
 
 ## Rules
@@ -40,7 +40,7 @@ cross-compile, and benchmark results.
 
 ```sh
 nix build .#sysroot          # ~314 MiB of RPMs on first build
-nix build .#demos            # result/bin/{x11-accel,sdl-accel,tilemap}
+nix build .#demos            # result/bin/{x11-accel,sdl-accel,tilemap,blit-bench}
 nix flake check              # builds tests/ and demos/
 nix develop                  # shell with $CC=xo-cc, $CXX=xo-c++, $PKG_CONFIG, …
 ```
@@ -82,7 +82,15 @@ that file is missing.
 - **`XSync` does not wait for the GP (blitter).** The Geode X driver queues commands
   in a 256 KB buffer that can hold seconds of work, so frame rates look 3–10× too
   high until the buffer fills. End every measured frame with a 1×1 `XGetImage`
-  (`finish()` in the demos).
+  **from a mapped window** (`finish()` in the demos). Reading from an offscreen pixmap
+  only waits if the queued operations touched that pixel.
+- **Same-colour `XFillRectangle` calls are merged** by Xlib into one request, and the
+  server fills the union only once. Change the colour per fill when measuring fill rates.
+- **Pixmaps filled with `XPutImage` start in system memory.** EXA does small operations
+  from them in software (0.5–1 ms each) until large GP operations have moved them in.
+  Warm up uploaded atlases with about 200 full-size copies or composites before timing.
+- Use fresh pixmaps per test. A software fallback migrates pixmaps out of video memory
+  and slows down whatever runs next.
 - Run each measurement long enough (≥ 6 s) and check per-second numbers for drift.
   Results carried over from a previous test's backlog skew short runs.
 - The Xv overlay is not visible to `XGetImage` or screenshots. Check CPU-rendered

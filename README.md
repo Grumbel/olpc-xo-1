@@ -60,18 +60,40 @@ benchmarks. In the examples, `<xo-host>` stands for the XO's hostname or address
 
 The Geode LX graphics unit is **2D only, with no 3D or GPU shaders**. It has:
 
-- **Graphics Processor (GP): a 2D BLT engine.** It handles solid and pattern
-  fills, screen-to-screen copies, the full set of 256 raster operations,
-  transparent and mono expansion blits, and **alpha blending** (Porter-Duff
-  compositing, which is what XRender's `Composite` uses). It also offers
-  rotation in 90° steps. The X driver `xorg-x11-drv-geode` 2.11.15
-  (`Driver "amd"`, `AccelMethod EXA`) uses it through **EXA**. The Xorg log shows
-  it registering *Solid*, *Copy* and *Composite*, so XRender text and plain
-  compositing are accelerated. **Scaled (transformed) composites are not**: the
-  GP cannot scale, so the server falls back to software (see
-  [Acceleration demos](#acceleration-demos)). Framebuffer compression is turned off
-  (`NoCompression`). The driver gets 14 MB of video memory, of which about 10 MB
-  is the EXA pixmap cache.
+- **Graphics Processor (GP): a 2D BLT engine.** Per the Geode LX documentation it
+  handles solid and pattern fills, screen-to-screen copies, the 256 raster
+  operations, transparent and mono expansion blits, alpha blending and rotation
+  in 90° steps. The X driver `xorg-x11-drv-geode` 2.11.15 (`Driver "amd"`,
+  `AccelMethod EXA`) uses it through **EXA** and registers *Solid*, *Copy* and
+  *Composite*. Measured with `blit-bench` ([Blitter costs and operations](#blitter-costs-and-operations)),
+  **accelerated** means:
+  - solid fills, tiled fills, `XCopyArea` with any GC function (`GXxor`, `GXand`, …)
+  - XRender with an ARGB32 or RGB565 source and no mask: `Src`, `Over`, `Add`,
+    `InReverse`, `OutReverse`, `Atop`, `Xor`, `In`, `Out`, `Clear`
+  - XRender with a solid source and an A8 mask (anti-aliased text)
+
+  These fall back to **software**, 25–300× slower:
+  - the PDF blend modes (`Multiply`, `Screen`, `Overlay`, `Darken`, `Lighten`, …),
+    `Saturate`, `AtopReverse`, the HSL modes, Disjoint/Conjoint operators
+  - an A8 or solid source without a mask, any picture source combined with a mask
+  - opaque stipple fills (very likely: 17 Mpixel/s)
+  - scaled (transformed) composites: the GP cannot scale (see [Acceleration demos](#acceleration-demos))
+
+  Framebuffer compression is turned off (`NoCompression`).
+- **Video memory:** 16 MB carved out of the 256 MB system RAM (`lxfb: 16384 KB of video
+  memory`, BAR at `0xfd000000`). The X driver manages 14 MB of it (where the other
+  2 MB go was not determined):
+
+  | Use | Size |
+  |---|---|
+  | Screen, 1200×1200×16 (room for rotation) | 2.75 MB |
+  | Hardware cursor | 12 KB |
+  | GP command buffer | 256 KB |
+  | **EXA offscreen pixmaps** | **10.0 MB** (10 476 544 bytes) |
+
+  In practice about **9 MB** of pixmaps can be in use at once while Sugar is running,
+  about 4.4 full-screen 16 bpp buffers. Beyond that, EXA keeps migrating pixmaps
+  between system and video memory, and operations become 20× slower.
 - **Video overlay with hardware colour conversion and scaling.** XVideo adaptor
   "AMD Geode LX" with 1 port, image input only (no `PutVideo`, no XvMC).
   `XvShmPutImage` works, so frames reach the server through shared memory.
@@ -352,11 +374,11 @@ GP is idle. **`XSync` is not enough** (see [The XSync pitfall](#the-xsync-pitfal
 
 | Test | fps | What |
 |---|---|---|
-| `fill` | 85.5 | 512 solid rects/frame, **530 Mpixel/s** (GP Solid) |
-| `copy100` | 69.3 | 100 opaque 32×32 sprites + scrolling background + back→window copy (GP Copy) |
-| `copy1000` | 15.2 | 1000 opaque sprites |
-| `over100` | 72.9 | 100 alpha sprites, XRender Over (GP Composite) |
-| `over1000` | 20.0 | 1000 alpha sprites |
+| `fill` | 83.2 | 512 solid rects/frame, about 515 Mpixel/s (GP Solid; overlapping rects in one request are merged, so this is an upper bound) |
+| `copy100` | 77.1 | 100 opaque 32×32 sprites + scrolling background + back→window copy (GP Copy) |
+| `copy1000` | 15.0 | 1000 opaque sprites |
+| `over100` | 79.5 | 100 alpha sprites, XRender Over (GP Composite) |
+| `over1000` | 19.5 | 1000 alpha sprites |
 | `rscale-nearest` | 17.0 | 640×480 GP scene (200 alpha sprites) → XRender transform to 1200×900 |
 | `rscale-bilinear` | 0.9 | same, bilinear filter |
 | `rscale-only` | 19.7 | XRender scale 640×480 → 1200×900 alone: **software fallback** |
@@ -370,10 +392,11 @@ What the numbers show:
 - **Full-screen copies cost about 6 ms each** (about 180 Mpixel/s). A double-buffered,
   scrolled 1200×900 frame needs two of them (ring/background → back buffer → window),
   so about 12 ms. That alone caps the frame rate at about 80 fps.
-- **Small blits cost 25–55 µs each:** about 18 000 opaque `XCopyArea` sprites/s and
-  about 26 000 32×32 alpha composites/s (`copy1000` and `over1000`, after subtracting the
-  background). Alpha composites are cheaper than `XCopyArea`. After the 12 ms of
-  full-screen copies, a 60 fps frame has room for roughly 100–150 sprites.
+- **Small blits cost about 40–60 µs each**, mostly fixed per-call cost: about 17 000
+  opaque `XCopyArea` and 23 000 32×32 alpha composites per second (`copy1000` and
+  `over1000`, after subtracting the background). After the 12 ms of full-screen copies,
+  a 60 fps frame has room for roughly 100–150 sprites. See
+  [Blitter costs and operations](#blitter-costs-and-operations) for the cost model.
   The GP pays off for large areas: fills, scrolling, full-frame copies,
   big alpha-blended layers.
 - **Hardware scaling is only available through Xv.** XRender transforms fall back
@@ -407,18 +430,19 @@ Measured on the XO (6 s runs, about 44 orbs on screen with the default `-n 48`):
 
 | Run | fps |
 |---|---|
-| `blit` | **74.5** |
-| `blit -direct` (no back buffer: ring → window, orbs on the window; tears/flickers) | 114.0 |
-| `blit -n 150` (about 137 orbs on screen) | 60.7 |
-| `blit -n 0` | 86.7 |
+| `blit` | **76.1** |
+| `blit -direct` (no back buffer: ring → window, orbs on the window; tears/flickers) | 121.8 |
+| `blit -n 150` (about 137 orbs on screen) | 60.1 |
+| `blit -n 0` | 86.5 |
 | `xv` | **80.6** |
 | `xv -n 150` | 51.1 |
 | `xv -n 0` | 114.9 |
 | `xv -nofilter` | 80.7 (the overlay filter is free) |
 
-`blit -profile` (one sync per phase, so slightly slower in total) shows where the
-frame goes: new tiles 0.5 ms, ring→back 6.1 ms, 43 orbs 2.5 ms, back→window 5.7 ms.
-Each 48×48 alpha orb costs about 33 µs (from the `-n 150` difference).
+`blit -profile` shows where the frame goes: new tiles 0.6 ms, ring→back 6.1 ms,
+43 orbs 2.4 ms, back→window 5.8 ms. Each phase includes one sync of about 0.3 ms,
+so the total is slower than a normal run. Each 48×48 alpha orb costs about 33 µs
+(from the `-n 150` difference).
 
 - **Native blitting is a solid choice:** 60+ fps at full resolution with 130+ alpha
   sprites. The client's own CPU work is small, but the CPU is not free: the X
@@ -432,6 +456,111 @@ Each 48×48 alpha orb costs about 33 µs (from the `-n 150` difference).
 - `-dump` writes the last Xv frame as a PPM, because the overlay is not visible to
   screenshots or `XGetImage`. The dumped frame was checked and looks right. The
   overlay's on-screen colours (RV16 channel order) were not checked, since I cannot see the XO's display.
+
+### Blitter costs and operations
+
+`demos/blit-bench.c` measures single operations on a 16 bpp offscreen pixmap
+(`-win`: on the screen, same results), with fresh pixmaps per test and a GP sync
+at the end. Run it as `blit-bench [-t seconds] [-win] [size|ops|rops|vram]`.
+
+**Cost vs. size** (µs per operation, square sprites), with a least-squares fit
+*cost = fixed + per-pixel × pixels*:
+
+| Operation | 4 | 8 | 16 | 32 | 64 | 128 | 256 | 512 | fixed | per pixel |
+|---|---|---|---|---|---|---|---|---|---|---|
+| fill | 50 | 48 | 48 | 48 | 50 | 54 | 157 | 578 | 41 µs | 2.0 ns (490 Mpixel/s) |
+| `XCopyArea` | 44 | 44 | 45 | 46 | 48 | 92 | 325 | 1155 | 39 µs | 4.3 ns (235 Mpixel/s) |
+| Render `Src` (RGB565) | 48 | 48 | 48 | 49 | 53 | 94 | 326 | 1151 | 42 µs | 4.2 ns (236 Mpixel/s) |
+| Render `Over` (ARGB32) | 43 | 43 | 49 | 45 | 52 | 170 | 625 | 2392 | 35 µs | 9.0 ns (111 Mpixel/s) |
+
+- **Sprite size hardly matters up to 64×64.** Every call costs about 35–45 µs
+  (request handling, EXA and GP setup on the 431 MHz CPU), which is about as much as
+  blending 4 000 pixels. The pixel cost only takes over above about 62×62 for `Over`,
+  95×95 for copies and 140×140 for fills. A few large blits beat many small ones.
+- Per pixel, fills write 2 bytes, copies read 2 and write 2, and `Over` reads 4 + 2 and writes 2,
+  hence 2 : 4 : 9 ns.
+
+**XRender operators** (ARGB32 source → RGB565 destination, µs per operation):
+
+| Operator | 64×64 | 256×256 | |
+|---|---|---|---|
+| `Src`, `Clear`, `In`, `Out` | 48 | 463 | GP |
+| `Over`, `InReverse`, `OutReverse`, `Atop`, `Xor`, `Add` | 51–62 | 615–629 | GP |
+| `Dst`, `OverReverse` | 9 | 9 | no-op (see below) |
+| `AtopReverse` | 1197 | 16 042 | software |
+| `Saturate` | 2107 | 31 373 | software |
+| `Multiply`, `Screen`, `Overlay`, `Darken`, `Lighten`, `HardLight`, `Difference`, `Exclusion` | 2 900–3 300 | 42 600–51 300 | software |
+| `ColorDodge`, `ColorBurn` | 4 270–4 800 | 65 000–67 000 | software |
+| `SoftLight`, `HSLHue` | 11 800–12 900 | 177 000–190 000 | software |
+| `DisjointOver`, `ConjointOver` | 2 420–3 200 | 34 400–48 100 | software |
+
+The destination has no alpha channel, so several operators collapse into simpler
+ones. `Dst` and `OverReverse` change nothing, which is why they cost only the request.
+`In` acts like `Src` and `Out` like `Clear`. The ones that do something distinct on
+an RGB565 screen are:
+- `Over`, normal alpha blending
+- `Add`, saturating additive blending for lights, glows and particles
+- `InReverse` (destination × source alpha), darkening or masking
+- `OutReverse` (destination × (1 − source alpha)), punching holes or shadows
+
+There is **no hardware multiply or screen blend**. A shadow can be done with `InReverse`,
+or with `Over` and a black sprite with alpha.
+
+**Sources and masks** (op `Over`):
+
+| Source / mask | 64×64 | 256×256 | |
+|---|---|---|---|
+| RGB565 source | 53 | 327 | GP (opaque, works like `Src`) |
+| ARGB32 source | 52 | 621 | GP |
+| solid + A8 mask (text) | 106 | 1 366 | GP |
+| solid source, no mask | 592 | 6 814 | software |
+| A8 source | 1 631 | 23 393 | software |
+| RGB565 / ARGB32 source + A8 or ARGB32 mask | 1 940–2 530 | 27 500–29 300 | software |
+
+**Core X raster ops and fills** (µs per operation):
+
+| Operation | 64×64 | 256×256 | Mpixel/s at 256 |
+|---|---|---|---|
+| `XCopyArea` `GXcopy`, `GXclear` | 48 | 322–326 | 201–204 |
+| `XCopyArea` `GXxor`, `GXand`, `GXor`, `GXinvert`, `GXequiv`, `GXnand` | 46–53 | 476–498 | 132–138 |
+| solid fill | 50 | 156 | 421 |
+| tiled fill (16×16 tile) | 79 | 382 | 172 |
+| opaque stipple fill (8×8) | 348 | 3 922 | 17 (very likely a software fallback) |
+
+All 256 raster operations are available through `XCopyArea`. The ones that read
+the destination run at about 2/3 of plain copy speed.
+
+**Offscreen memory** (`vram`): *n* pixmaps of 512 KB each, filled round-robin with a
+sync after every fill:
+
+| Pixmaps in use | 1–9 MB | 10–20 MB |
+|---|---|---|
+| µs per 512×512 fill (incl. sync) | 856–865 | 14 200–18 900 |
+
+The cliff at 10 MB matches the 10.0 MB EXA area minus what Sugar and X already use.
+
+**Two more measurement traps**, found while writing `blit-bench`:
+- **Same-colour fills are merged.** Xlib combines consecutive `XFillRectangle` calls
+  with the same GC into one `PolyFillRectangle` request, and the server fills the
+  union of the rectangles. With one colour, 512×512 fills appeared to take 17 µs
+  ("15 Gpixel/s"). Changing the colour per fill gives the real 578 µs.
+- **Pixmaps uploaded with `XPutImage` start out slow.** EXA does small operations
+  from them in software, with a GP sync each time, until enough large accelerated
+  operations have moved them into video memory. This was measured with a one-off
+  probe; `blit-bench` now warms up its sources:
+
+  | Source pixmap → window, µs per `XCopyArea` | 4 | 8 | 16 | 32 | 64 | 128 |
+  |---|---|---|---|---|---|---|
+  | filled by `XPutImage` | 495 | 870 | 965 | 191 | 135 | 129 |
+  | `XPutImage`, then 200 full-size copies | 56 | 55 | 57 | 57 | 60 | 134 |
+  | filled by GP fills only | 65 | 52 | 52 | 53 | 56 | 99 |
+
+  After uploading a sprite atlas, warm it up with a few large GP operations. The
+  demos now do this. It changed their results only slightly (for example
+  `copy100` went from 69 to 77 fps).
+- The GP sync must read from a **window**. A 1×1 `XGetImage` from an offscreen
+  pixmap only waits if the queued operations touched that pixel, because EXA serves
+  the rest from its system-memory copy.
 
 ### The XSync pitfall
 
@@ -464,7 +593,7 @@ yuv-640       70.6 fps  640x480 YV12 -> 1200x900, hw_overlay=1, 200 CPU-drawn sp
   about the GP: everything is a software surface flushed with MIT-SHM.
 - **Hardware scaling works in SDL** through `SDL_CreateYUVOverlay`, which is backed
   by Xv (`hw_overlay=1`). `SDL_DisplayYUVOverlay` with a fullscreen rect gives
-  the same 640×480→1200×900 scaling as raw Xv, at the same speed (70.6 vs 72.6 fps).
+  the same 640×480→1200×900 scaling as raw Xv, at about the same speed (70.6 vs 73.9 fps).
   SDL only offers YUV formats (no RV16), so the game has to draw in YUV or
   convert to it.
 - With `SDL_VIDEO_YUV_HWACCEL=0`, SDL's software YUV path **segfaults** on the XO,
