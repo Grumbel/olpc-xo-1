@@ -183,7 +183,7 @@ YUV output.
   WebKitGTK 1.10, GStreamer 0.10 and 1.0, gnash 0.8.10
 - Languages: **Python 2.7.3** (no Python 3), Perl 5.16, Lua, bash 4.2
 - Tools present: `wget`, `curl`, `yum`, `vi` (vim-minimal), `nano`, `sudo`
-- **Not installed**: `gcc`/`make`, `git`, `openssl` CLI, `screen`/`tmux`, `lspci`/`lsusb`, `bc`, `time`
+- **Not installed**: `gcc`/`make` (no headers or -devel packages at all; see [Cross-compiling](#cross-compiling)), `git`, `openssl` CLI, `screen`/`tmux`, `lspci`/`lsusb`, `bc`, `time`
 - OpenSSH 6.1p1 / OpenSSL 1.0.1e. Modern clients warn that no post-quantum key
   exchange is offered.
 - User `olpc` (uid 1000) is in `wheel`. `sudo` requires a TTY (`ssh -t`).
@@ -199,6 +199,58 @@ TamTamSynthLab, Terminal, TurtleBlocks, Write
 ### Largest processes at idle (RSS)
 Sugar shell (python2) 53 MB, Terminal 29 MB, X 14 MB, another python2 12 MB,
 dhclient 10 MB, journald 8 MB, metacity 8 MB
+
+## Cross-compiling
+
+`flake.nix` provides a sysroot that matches the XO's installed software, plus a
+clang-based cross toolchain. The XO itself has no compiler, headers or
+`-devel` packages.
+
+```sh
+nix develop                       # xo-cc, xo-c++, xo-pkg-config, xo-ar, … and $CC/$CXX set
+xo-cc -O2 -o hello hello.c
+xo-cc -O2 -o game game.c $(xo-pkg-config --cflags --libs sdl)
+scp hello olpc@<xo-host>:
+
+cmake -DCMAKE_TOOLCHAIN_FILE=$XO_CMAKE_TOOLCHAIN …
+meson setup --cross-file $XO_MESON_CROSS build
+./configure --host=i686-redhat-linux   # i686-redhat-linux-gcc etc. are on $PATH
+```
+
+Flake outputs: `packages.x86_64-linux.{sysroot,toolchain,cmake-toolchain,meson-cross}`
+and `checks.x86_64-linux.hello`. That check builds `tests/` (C, C++, SDL 1.2 and
+GTK 3). All four were run on the XO and work.
+
+### How the sysroot is built
+- `sysroot/xo-installed.tsv` is the XO's `rpm -qa` (746 packages).
+- `tools/gen-sysroot-lock.py` resolves `sysroot/lock.json` from the repo metadata of
+  Fedora 18 (release and updates, archives.fedoraproject.org) and OLPC
+  (`rpmdropbox.laptop.org/f18` and `/f18-xo1`). The result is **843 RPMs, 314 MiB to
+  download, 883 MB unpacked**, made up of:
+  - every installed package that ships shared libraries, at **exactly the version on the XO**
+  - the `-devel`/`-headers` subpackages of the same source RPMs, at the same version,
+    skipped when they need a library that isn't on the XO (Qt, OpenMPI, boost, …)
+  - their devel→devel dependency closure
+  - `gcc` 4.7.2 for `crt*.o`/`libgcc`, `libstdc++-devel` 4.7.2, and
+    `kernel-headers` from OLPC's XO-1 kernel 3.3.8
+- The flake fetches the RPMs by sha256 and unpacks them with bsdtar. It creates
+  the merged-`/usr` symlinks and rewrites absolute symlinks to relative ones.
+  Some repos are plain HTTP, but the fixed hashes protect integrity.
+- To regenerate: `tools/update-sysroot-lock.sh olpc@<xo-host>`
+
+### Toolchain details
+- clang/lld 21 (nixpkgs 26.05), `--target=i686-redhat-linux --sysroot=… -march=geode`.
+  `-march=geode` avoids SSE and long NOPs, which the Geode LX lacks.
+  libgcc, libgcc_s and libstdc++ come from the sysroot, so binaries only need what is on the XO.
+  The test binaries require at most GLIBC_2.1.3 and GLIBCXX_3.4.9.
+- nixpkgs' unwrapped clang passes no `-dynamic-linker`. The wrapper adds
+  `/lib/ld-linux.so.2` and the other link-only flags when linking.
+- **C++:** the library is gcc 4.7's libstdc++, which has C++11 at most (no
+  `std::make_unique`, `<optional>`, `<filesystem>`, …). Newer *language* features
+  compile, because clang defaults to C++17. Sized and aligned deallocation are
+  turned off (`-fno-sized-deallocation -fno-aligned-allocation`) because libstdc++ 4.7
+  lacks those operators.
+- Binaries are PIE by default, which glibc 2.16 handles.
 
 ## Performance
 
@@ -276,6 +328,10 @@ Measured with 500×500 operations at 16 bpp. One 500×500 area is 0.5 MB.
 | ShmPutImage (CPU → VRAM over shared memory) | 331/s | about 165 MB/s | CPU |
 | PutImage (over the X socket) | 63/s | about 32 MB/s | CPU + protocol |
 | GetImage (VRAM → CPU) | 32/s | about 16 MB/s | CPU, slow uncached VRAM read |
+
+**SDL 1.2 (x11 driver), CPU-drawn full-screen 1200×900×16:** `tests/sdl-test.c`,
+cross-compiled, reaches **13 fps**. Each frame computes every pixel and then
+calls `SDL_Flip`. Calling `SDL_MapRGB` per pixel instead drops it to 2 fps.
 
 A full 1200×900×16 bpp frame is 2.16 MB. Uploading it with MIT-SHM takes about
 13 ms, so about 75 fps is the upload-only ceiling before the CPU spends any
