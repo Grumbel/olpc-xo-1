@@ -65,12 +65,16 @@ The Geode LX graphics unit is **2D only, with no 3D or GPU shaders**. It has:
   transparent and mono expansion blits, and **alpha blending** (Porter-Duff
   compositing, which is what XRender's `Composite` uses). It also offers
   rotation in 90° steps. The X driver `xorg-x11-drv-geode` 2.11.15
-  (`Driver "amd"`, `AccelMethod EXA`) uses it through **EXA**, so XRender text
-  and compositing are accelerated. Framebuffer compression is turned off
+  (`Driver "amd"`, `AccelMethod EXA`) uses it through **EXA**. The Xorg log shows
+  it registering *Solid*, *Copy* and *Composite*, so XRender text and plain
+  compositing are accelerated. **Scaled (transformed) composites are not**: the
+  GP cannot scale, so the server falls back to software (see
+  [Acceleration demos](#acceleration-demos)). Framebuffer compression is turned off
   (`NoCompression`). The driver gets 14 MB of video memory, of which about 10 MB
   is the EXA pixmap cache.
 - **Video overlay with hardware colour conversion and scaling.** XVideo adaptor
-  "AMD Geode LX" with 1 port and `PutImage` only (no XvShm, no XvMC).
+  "AMD Geode LX" with 1 port, image input only (no `PutVideo`, no XvMC).
+  `XvShmPutImage` works, so frames reach the server through shared memory.
   - Accepts packed YUV (UYVY, YUY2, YVYU, Y2YU), planar YUV (**I420, YV12**),
     Y800 greyscale, and RV16 (RGB565).
   - Does YUV→RGB conversion and **up/down scaling with an optional filter**
@@ -217,8 +221,8 @@ meson setup --cross-file $XO_MESON_CROSS build
 ./configure --host=i686-redhat-linux   # i686-redhat-linux-gcc etc. are on $PATH
 ```
 
-Flake outputs: `packages.x86_64-linux.{sysroot,toolchain,cmake-toolchain,meson-cross}`
-and `checks.x86_64-linux.hello`. That check builds `tests/` (C, C++, SDL 1.2 and
+Flake outputs: `packages.x86_64-linux.{sysroot,toolchain,cmake-toolchain,meson-cross,demos}`
+and `checks.x86_64-linux.{hello,demos}`. The `hello` check builds `tests/` (C, C++, SDL 1.2 and
 GTK 3). All four were run on the XO and work.
 
 ### How the sysroot is built
@@ -336,6 +340,75 @@ calls `SDL_Flip`. Calling `SDL_MapRGB` per pixel instead drops it to 2 fps.
 A full 1200×900×16 bpp frame is 2.16 MB. Uploading it with MIT-SHM takes about
 13 ms, so about 75 fps is the upload-only ceiling before the CPU spends any
 time producing the pixels.
+
+### Acceleration demos
+
+`demos/x11-accel.c` and `demos/sdl-accel.c` (`nix build .#demos`) run every
+path in turn for 3 s each, over a fullscreen override-redirect window. The scene
+is a horizontally scrolling background with bouncing 32×32 balls.
+- **Blitter tests:** background and sprites live in VRAM pixmaps. Opaque sprites
+  use `XCopyArea`; alpha sprites use an ARGB32 atlas and `XRenderComposite` Over.
+  The frame is composed in a back-buffer pixmap and then copied to the window.
+- **CPU tests:** the scene is drawn into RAM and sent with `XShmPutImage` or `XvShmPutImage`.
+
+Each frame ends with `XSync`.
+
+`x11-accel` (Xlib + RENDER + Xv), measured on the XO:
+
+| Test | fps | What |
+|---|---|---|
+| `fill` | 96.6 | 512 solid rects/frame, **598 Mpixel/s** (GP Solid) |
+| `copy100` | 110.3 | 100 opaque sprites + 2 background blits (GP Copy) |
+| `copy1000` | 9.9 | 1000 opaque sprites, about **10 000 sprites/s** |
+| `over100` | 154.1 | 100 alpha sprites, XRender Over (GP Composite) |
+| `over1000` | 7.5 | 1000 alpha sprites, about **7 500 sprites/s** |
+| `rscale-nearest` | 6.7 | 640×480 GP scene (200 alpha sprites) → XRender transform to 1200×900 |
+| `rscale-bilinear` | 0.8 | same, bilinear filter |
+| `rscale-only` | 15.6 | XRender scale 640×480 → 1200×900 alone: **software fallback** |
+| `xv-rv16` | 61.5 | 640×480 RGB565 drawn by CPU (200 sprites) → **Xv overlay scales** to 1200×900 |
+| `xv-yv12` | **72.6** | same in YV12 (12 bpp, less to copy) |
+| `xv-yv12-only` | 150.6 | Xv scaling with only the scrolling background |
+| `shm-full` | 26.6 | 1200×900 drawn by CPU (200 sprites), `XShmPutImage` |
+| `shm-640` | 75.0 | 640×480 drawn by CPU (200 sprites), unscaled |
+
+What the numbers show:
+- **The blitter is fast per pixel but slow per request.** Each sprite blit costs
+  about 100 µs, no matter how small, so the limit is about 10 000 opaque or
+  7 500 alpha sprites per second. That is roughly 100–150 sprites per frame at
+  60 fps. The GP pays off for large areas: fills, scrolling, full-frame copies,
+  big alpha-blended layers.
+- **Hardware scaling is only available through Xv.** XRender transforms fall back
+  to software (15.6 fps for the scaling alone, 0.8 fps bilinear). The Xv overlay
+  scales 640×480 to 1200×900 for free. It also accepts RGB565 (`RV16`) besides YUV.
+- **Render 640×480 on the CPU and let Xv scale it.** That reaches 72 fps with 200
+  sprites in YV12, against 26.6 fps for drawing 1200×900 directly. RV16 costs
+  about 15% more than YV12 (2 bytes/pixel instead of 1.5) but keeps RGB drawing code.
+  A GP-rendered pixmap cannot be fed to Xv: Xv takes images from client
+  memory, and reading VRAM back runs at about 16 MB/s.
+- **The overlay is a separate plane** shown where the window holds the colour key.
+  The demo fills the window with the key from `XV_COLORKEY`.
+
+`sdl-accel` (SDL 1.2.15, x11 driver), measured on the XO:
+
+```
+hw_available=0 wm_available=1 blit_hw=0 blit_hw_CC=0 blit_hw_A=0 blit_fill=0 video_mem=0 KB
+asked for SDL_HWSURFACE|SDL_DOUBLEBUF, got SDL_SWSURFACE
+sw-blit       22.3 fps  1200x900 software surface, 200 RLE colour-keyed sprites
+yuv-640       70.6 fps  640x480 YV12 -> 1200x900, hw_overlay=1, 200 CPU-drawn sprites
+```
+
+- **No hardware surfaces or blits in SDL.** SDL 1.2's x11 driver knows nothing
+  about the GP: everything is a software surface flushed with MIT-SHM.
+- **Hardware scaling works in SDL** through `SDL_CreateYUVOverlay`, which is backed
+  by Xv (`hw_overlay=1`). `SDL_DisplayYUVOverlay` with a fullscreen rect gives
+  the same 640×480→1200×900 scaling as raw Xv, at the same speed (70.6 vs 72.6 fps).
+  SDL only offers YUV formats (no RV16), so the game has to draw in YUV or
+  convert to it.
+- With `SDL_VIDEO_YUV_HWACCEL=0`, SDL's software YUV path **segfaults** on the XO,
+  even unscaled (`-noscale`). The crash is inside SDL. I could not debug it
+  further because the XO has no gdb.
+- SDL's `fbcon` driver has no Geode acceleration either. It was not tested,
+  because it needs X to be stopped.
 
 ### Network
 - Ping RTT from the LAN: 4.8 / 5.6 / 6.1 ms (min/avg/max)

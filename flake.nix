@@ -158,12 +158,21 @@
         cpu = 'i586'
         endian = 'little'
       '';
+      demos = pkgs.runCommand "xo1-demos" { nativeBuildInputs = [ toolchain ]; } ''
+        mkdir -p $out/bin
+        cd ${./demos}
+        xo-cc -O2 -Wall -Wextra -o $out/bin/x11-accel x11-accel.c \
+          $(xo-pkg-config --cflags --libs x11 xext xv xrender) -lm
+        xo-cc -O2 -Wall -Wextra -o $out/bin/sdl-accel sdl-accel.c \
+          $(xo-pkg-config --cflags --libs sdl) -lm
+      '';
     in
     {
       packages.${system} = {
         inherit sysroot toolchain;
         cmake-toolchain = cmakeToolchain;
         meson-cross = mesonCross;
+        inherit demos;
         default = toolchain;
       };
 
@@ -181,6 +190,7 @@
       };
 
       # Compile and link the test programs; running them needs the XO itself.
+      checks.${system}.demos = demos;
       checks.${system}.hello = pkgs.runCommand "xo1-hello" { nativeBuildInputs = [ toolchain ]; } ''
         mkdir -p $out
         xo-cc -O2 -Wall -o $out/hello-c ${./tests/hello.c} -lm
