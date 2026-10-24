@@ -190,13 +190,15 @@
       };
 
       # Compile and link the test programs; running them needs the XO itself.
-      checks.${system}.demos = demos;
-      checks.${system}.hello = pkgs.runCommand "xo1-hello" { nativeBuildInputs = [ toolchain ]; } ''
-        mkdir -p $out
-        xo-cc -O2 -Wall -o $out/hello-c ${./tests/hello.c} -lm
-        xo-c++ -O2 -Wall -o $out/hello-cxx ${./tests/hello.cpp}
-        xo-cc -O2 -Wall -o $out/sdl-test ${./tests/sdl-test.c} $(xo-pkg-config --cflags --libs sdl)
-        xo-cc -O2 -Wall -o $out/gtk3-test ${./tests/gtk3-test.c} $(xo-pkg-config --cflags --libs gtk+-3.0)
-      '';
+      checks.${system} = {
+        inherit demos;
+        hello = pkgs.runCommand "xo1-hello" { nativeBuildInputs = [ toolchain ]; } ''
+          mkdir -p $out
+          xo-cc -O2 -Wall -o $out/hello-c ${./tests/hello.c} -lm
+          xo-c++ -O2 -Wall -o $out/hello-cxx ${./tests/hello.cpp}
+          xo-cc -O2 -Wall -o $out/sdl-test ${./tests/sdl-test.c} $(xo-pkg-config --cflags --libs sdl)
+          xo-cc -O2 -Wall -o $out/gtk3-test ${./tests/gtk3-test.c} $(xo-pkg-config --cflags --libs gtk+-3.0)
+        '';
+      };
     };
 }
