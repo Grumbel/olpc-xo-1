@@ -96,6 +96,44 @@ is scaled YUV video output. Anything else, such as decoding, 3D, and pixels the
 CPU generates and pushes with `XPutImage`, depends on the CPU and memory bus.
 See the [x11perf numbers](#graphics-x11-x11perf) under Performance.
 
+#### Who can use the acceleration
+
+**Only the X driver uses it.** The kernel exposes no acceleration interface:
+
+- **No DRM/KMS.** `/sys/class/drm` and `/dev/dri` are absent, and the kernel
+  has no `drivers/gpu` modules. As far as I know, mainline Linux has never
+  had a DRM driver for the Geode.
+- **The fbdev driver draws in software.** `lxfb` is built into the kernel and
+  claims the GP register block (`lxfb-gp` in `/proc/iomem`). It only uses the
+  chip for mode setting and panning, though. Console drawing uses the generic
+  software routines (the `sysfillrect` and `syscopyarea` modules are loaded),
+  and there is no ioctl for blit or fill commands. `/dev/fb0` therefore gives
+  you a plain mapping of video memory, with CPU-speed pixel pushing only.
+- **The X server drives the hardware directly from user space.** It runs as
+  root and maps all PCI BARs of the graphics device through sysfs (with
+  libpciaccess), plus a piece of `/dev/mem` (BIOS area at 0xf0000). Taken
+  from `/proc/<Xorg pid>/maps`:
+
+  | sysfs file (`/sys/bus/pci/devices/0000:00:01.1/`) | Physical | Block |
+  |---|---|---|
+  | `resource0` | `fd000000`, 16 MB | Video memory (framebuffer + offscreen) |
+  | `resource1` | `fe000000`, 16 KB | **GP**: 2D blitter / ROP / alpha engine |
+  | `resource2` | `fe004000`, 16 KB | **VG**: display controller (timing, cursor, compression) |
+  | `resource3` | `fe008000`, 16 KB | **VP**: video processor (overlay, YUV→RGB, scaler) |
+  | `resource4` | `fe00c000`, 16 KB | VIP (video input port) |
+
+  `xorg-x11-drv-geode` then writes GP commands into those registers
+  itself. The kernel does no arbitration.
+
+**What this means:** any root program can drive the GP and the video overlay
+the same way, by `mmap`ing `resource1`/`resource3` for registers and
+`resource0` for video memory. The `lx_*.c` and `cim/` (Cimarron) sources in
+xf86-video-geode are the reference, and so is the AMD Geode LX data book.
+Do this only while X is not running or is switched away to another virtual
+terminal, because two users of the GP would corrupt each other's state.
+Within X, the supported routes are XRender (EXA) for 2D and XVideo for scaled
+YUV output.
+
 ### Wireless
 - **Marvell 88W8388** 802.11b/g on internal USB (`1286:2001`), driver
   `libertas` / `usb8xxx`, firmware `usb8388_olpc.bin`
