@@ -1,24 +1,23 @@
-# OLPC XO-1 `xo-XX-XX-XX`
+# OLPC XO-1
 
-Inventory of the OLPC XO-1 reachable at `ssh olpc@<xo-host>`.
-Collected 2026-10-24 over SSH from the running system: `/proc`, `/sys`, the
-OpenFirmware device tree, `dmesg`, `rpm`, plus a few small benchmarks.
+Hardware, software and performance notes for the OLPC XO-1 running OLPC OS
+13.2.10, plus a Nix-based cross-compilation setup and graphics demos. The data
+was collected 2026-10-24 over SSH from a running unit (a C2 mass-production
+board): `/proc`, `/sys`, the OpenFirmware device tree, `dmesg`, `rpm`, and
+benchmarks. In the examples, `<xo-host>` stands for the XO's hostname or address.
 
 ## Summary
 
 | | |
 |---|---|
-| Model | OLPC XO-1, board revision **C2** (mass-production), model `CL1` |
-| Serial | `XXXXXXXXXXX` (Quanta, Shanghai) |
-| UUID | `XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX` |
-| Manufactured | XXXX-XX-XX |
-| Locale/keyboard | USA, `en_US.UTF-8`, US keyboard (`KL=us`, `KM=olpc`) |
-| Firmware (OFW) | **Q2F20** (DMI: "OLPC Ver 1.00.01 06/11/2014") |
+| Model | OLPC XO-1, model `CL1`. Mass-production boards are revision **C2**, built by Quanta |
+| Identity | Serial number, UUID, MAC, locale and keyboard layout are in the OpenFirmware `mfg-data` (`/proc/device-tree/mfg-data/`: `SN`, `U#`, `WM`, `LA`, `KL`, …) |
+| Firmware (OFW) | **Q2F20** on the surveyed unit (DMI: "OLPC Ver 1.00.01 06/11/2014") |
 | EC firmware | Ver 1.2.1 (EC code 0x58) |
 | OS | **OLPC OS 13.2.10 for XO-1 (build 22)**, based on Fedora 18 |
 | Kernel | `3.3.8_xo1-20150317.1153.olpc.7ceb87d` PREEMPT, i586 |
 | Desktop | Sugar 0.112 |
-| Wi-Fi MAC | `XX:XX:XX:XX:XX:XX` (the hostname comes from the last three bytes) |
+| Hostname | `xo-XX-XX-XX`, from the last three bytes of the Wi-Fi MAC |
 
 ## Hardware
 
@@ -43,7 +42,8 @@ OpenFirmware device tree, `dmesg`, `rpm`, plus a few small benchmarks.
 ### Storage
 - **1 GB raw NAND** (2 chips) on the Marvell CaFé controller (`mtd0 "cafe_nand"`,
   128 KB erase blocks), no FTL
-- Root filesystem is **JFFS2** directly on the MTD: 1.0 GB, **799 MB used, 226 MB free (79%)**.
+- Root filesystem is **JFFS2** directly on the MTD: 1.0 GB. With OLPC OS 13.2.10 and the
+  default activities, about **800 MB is used and about 225 MB free**.
   `/home`, `/versions` and `/security` are bind-mounts of the same fs.
 - `/tmp`, `/var/tmp`, `/var/log` and others are tmpfs (stateless setup)
 - **SD card slot** (`sdhci-pci` on the CaFé chip)
@@ -51,7 +51,7 @@ OpenFirmware device tree, `dmesg`, `rpm`, plus a few small benchmarks.
 ### Display
 - 7.5" dual-mode TFT, **1200×900**, 201 dpi (152×114 mm)
 - **DCON** (Display CONtroller, version 2) can hold the image while the CPU
-  sleeps. Backlight `dcon-bl`, levels 0–15, currently 11.
+  sleeps. Backlight `dcon-bl`, levels 0–15.
 - Framebuffer `lxfb` ("Geode LX"), 16 MB video memory, X runs at **16 bpp**
 - Per the XO-1 spec, the panel has a backlit colour mode and a sunlight-readable monochrome
   reflective mode
@@ -142,9 +142,6 @@ YUV output.
 - **Marvell 88W8388** 802.11b/g on internal USB (`1286:2001`), driver
   `libertas` / `usb8xxx`, firmware `usb8388_olpc.bin`
 - Interfaces: `eth0` (station) and **`msh0` (802.11s mesh)**
-- Currently connected to SSID "XXXX", 2.457 GHz (ch 10), signal **−82 dBm**
-  (link quality 28/70), bitrate 5.5–48 Mb/s. The signal is weak.
-- IPv4 X.X.X.X/24 (DHCP), IPv6 SLAAC
 - No wired Ethernet
 
 ### Other peripherals
@@ -175,10 +172,9 @@ YUV output.
 | 00:0f.5 | 1022:2095 | CS5536 EHCI | `ehci_hcd` |
 
 ### Battery and power
-- **BYD LiFePO4** pack, design capacity 2800 mAh, 6.5 V max design
-- Health "Good". At the time of the survey it was **nearly flat: 5%**
-  (140 mAh), 5.37 V, trickle-charging on AC.
-- Battery temperature 23.9 °C, ambient 35 °C
+- The surveyed unit has a **BYD LiFePO4** pack: design capacity 2800 mAh, 6.5 V max design
+- `/sys/class/power_supply/olpc-battery` reports capacity, charge, voltage, current,
+  temperature (battery and ambient), health, manufacturer and serial; `olpc-ac` reports the charger
 
 ## Software
 
@@ -191,8 +187,9 @@ YUV output.
 - OpenSSH 6.1p1 / OpenSSL 1.0.1e. Modern clients warn that no post-quantum key
   exchange is offered.
 - User `olpc` (uid 1000) is in `wheel`. `sudo` requires a TTY (`ssh -t`).
-- **Clock is not set.** The system thinks it is 2013-01-01, so the RTC has no
-  valid time and no NTP is running. TLS certificate checks will fail until it is fixed.
+- **Check the clock.** No NTP client runs by default. If the RTC has lost its time,
+  the system starts at 2013-01-01 (as on the surveyed unit), and TLS certificate
+  checks fail until the clock is set.
 
 ### Sugar activities installed (`~/Activities`)
 Browse, Calculate, Chat, Clock, Distance, GetBooks, Help, ImageViewer, Implode,
@@ -298,11 +295,8 @@ two orders of magnitude slower than a current desktop core.
 
 ### SD card
 
-Test card: 2 GB SD (1.85 GiB, 3893248 sectors), 
-made in 2005. FAT16, empty. The controller runs it in **SD high-speed mode, 48 MHz,
-4-bit bus** (about 24 MB/s bus maximum). On first insertion the kernel logged a
-read error at the last sector (3893120), and the card was then re-detected
-(probably while it was still being seated). No errors occurred during the tests.
+Test card: an old 2 GB SD card from 2005, FAT16, empty. The controller runs it in
+**SD high-speed mode, 48 MHz, 4-bit bus** (about 24 MB/s bus maximum).
 
 | Test | Throughput |
 |---|---|
@@ -480,11 +474,10 @@ yuv-640       70.6 fps  640x480 YV12 -> 1200x900, hw_overlay=1, 200 CPU-drawn sp
   because it needs X to be stopped.
 
 ### Network
-- Ping RTT from the LAN: 4.8 / 5.6 / 6.1 ms (min/avg/max)
-- SSH upload (8 MB random data): **about 69 kB/s**. Two things limit it: the
-  weak Wi-Fi signal (−82 dBm) and the CPU cost of SSH encryption. A download
-  test over SSH did not finish within 5 minutes and was stopped. For bulk
-  transfers, use a USB stick or SD card, or move the XO closer to the AP.
+- With a weak Wi-Fi signal (−82 dBm), an SSH upload of 8 MB managed only about
+  **69 kB/s**, and a download test over SSH did not finish within 5 minutes. SSH
+  encryption on the 431 MHz CPU adds to this. For bulk transfers, use a USB stick or
+  SD card, or a good Wi-Fi signal.
 
 ## Notes and caveats
 
