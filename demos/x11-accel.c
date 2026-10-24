@@ -1,6 +1,6 @@
 /* x11-accel: exercises every acceleration path the Geode LX X driver offers
  * (EXA Solid/Copy/Composite, Xv overlay scaling) next to the CPU paths, and
- * reports frame rates.
+ * reports frame rates. Every frame ends with finish(), which waits for the GP.
  *
  *   x11-accel [-t seconds] [test ...]
  *
@@ -47,6 +47,15 @@ static void put_image(Drawable d, GC g, int depth, void *data, int w, int h)
     XDestroyImage(img);
 }
 
+/* XSync only waits until the server has queued the GP commands; reading a pixel
+ * back makes EXA wait until the GP is idle, so frame rates are real. */
+static void finish(void)
+{
+    XImage *img = XGetImage(dpy, win, 0, 0, 1, 1, AllPlanes, ZPixmap);
+    if (img)
+        XDestroyImage(img);
+}
+
 static void report(const char *name, int frames, double t, const char *extra)
 {
     printf("%-18s %7.1f fps  %s\n", name, frames / t, extra ? extra : "");
@@ -82,7 +91,7 @@ static void test_fill(void)
             XSetForeground(dpy, gc, (unsigned long)rgb565(rand() & 255, rand() & 255, rand() & 255));
             XFillRectangles(dpy, win, gc, r[c], NR);
         }
-        XSync(dpy, False);
+        finish();
         frames++;
     }
     char buf[96];
@@ -117,7 +126,7 @@ static void test_sprites(const char *name, int n, int alpha)
         move_sprites(n, W, H);
         blit_scene(back, back_pict, bg_full, W, H, (frames * 2) % W, n, alpha);
         XCopyArea(dpy, back, win, gc, 0, 0, (unsigned)W, (unsigned)H, 0, 0);
-        XSync(dpy, False);
+        finish();
         frames++;
     }
     char buf[96];
@@ -142,7 +151,7 @@ static void test_render_scale(const char *name, const char *filter, int n)
         blit_scene(scene, scene_pict, bg_small, SW, SH, (frames * 2) % SW, n, 1);
         XRenderComposite(dpy, PictOpSrc, scene_pict, None, win_pict, 0, 0, 0, 0, 0, 0,
                          (unsigned)W, (unsigned)H);
-        XSync(dpy, False);
+        finish();
         frames++;
     }
     XTransform id = {{{XDoubleToFixed(1), 0, 0}, {0, XDoubleToFixed(1), 0}, {0, 0, XDoubleToFixed(1)}}};
@@ -195,7 +204,7 @@ static void test_xv(const char *name, int fourcc, int n)
         }
         XvShmPutImage(dpy, xv_port, win, gc, img, 0, 0, SW, SH, 0, 0, (unsigned)W,
                       (unsigned)H, False);
-        XSync(dpy, False);
+        finish();
         frames++;
     }
     XvStopVideo(dpy, xv_port, win);
@@ -232,7 +241,7 @@ static void test_shm(const char *name, int w, int h, int n)
         draw_sprites_565((uint16_t *)img->data, img->bytes_per_line / 2, n);
         XShmPutImage(dpy, win, gc, img, 0, 0, (W - w) / 2, (H - h) / 2, (unsigned)w,
                      (unsigned)h, False);
-        XSync(dpy, False);
+        finish();
         frames++;
     }
     XShmDetach(dpy, &shm);

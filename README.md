@@ -351,42 +351,111 @@ is a horizontally scrolling background with bouncing 32×32 balls.
   The frame is composed in a back-buffer pixmap and then copied to the window.
 - **CPU tests:** the scene is drawn into RAM and sent with `XShmPutImage` or `XvShmPutImage`.
 
-Each frame ends with `XSync`.
+Each frame ends with `finish()`, a 1×1 `XGetImage` that makes EXA wait until the
+GP is idle. **`XSync` is not enough** (see [The XSync pitfall](#the-xsync-pitfall)).
 
 `x11-accel` (Xlib + RENDER + Xv), measured on the XO:
 
 | Test | fps | What |
 |---|---|---|
-| `fill` | 96.6 | 512 solid rects/frame, **598 Mpixel/s** (GP Solid) |
-| `copy100` | 110.3 | 100 opaque sprites + 2 background blits (GP Copy) |
-| `copy1000` | 9.9 | 1000 opaque sprites, about **10 000 sprites/s** |
-| `over100` | 154.1 | 100 alpha sprites, XRender Over (GP Composite) |
-| `over1000` | 7.5 | 1000 alpha sprites, about **7 500 sprites/s** |
-| `rscale-nearest` | 6.7 | 640×480 GP scene (200 alpha sprites) → XRender transform to 1200×900 |
-| `rscale-bilinear` | 0.8 | same, bilinear filter |
-| `rscale-only` | 15.6 | XRender scale 640×480 → 1200×900 alone: **software fallback** |
-| `xv-rv16` | 61.5 | 640×480 RGB565 drawn by CPU (200 sprites) → **Xv overlay scales** to 1200×900 |
-| `xv-yv12` | **72.6** | same in YV12 (12 bpp, less to copy) |
-| `xv-yv12-only` | 150.6 | Xv scaling with only the scrolling background |
-| `shm-full` | 26.6 | 1200×900 drawn by CPU (200 sprites), `XShmPutImage` |
-| `shm-640` | 75.0 | 640×480 drawn by CPU (200 sprites), unscaled |
+| `fill` | 85.5 | 512 solid rects/frame, **530 Mpixel/s** (GP Solid) |
+| `copy100` | 69.3 | 100 opaque 32×32 sprites + scrolling background + back→window copy (GP Copy) |
+| `copy1000` | 15.2 | 1000 opaque sprites |
+| `over100` | 72.9 | 100 alpha sprites, XRender Over (GP Composite) |
+| `over1000` | 20.0 | 1000 alpha sprites |
+| `rscale-nearest` | 17.0 | 640×480 GP scene (200 alpha sprites) → XRender transform to 1200×900 |
+| `rscale-bilinear` | 0.9 | same, bilinear filter |
+| `rscale-only` | 19.7 | XRender scale 640×480 → 1200×900 alone: **software fallback** |
+| `xv-rv16` | **76.5** | 640×480 RGB565 drawn by CPU (200 sprites) → **Xv overlay scales** to 1200×900 |
+| `xv-yv12` | 73.9 | same in YV12 |
+| `xv-yv12-only` | 149.8 | Xv scaling with only the scrolling background |
+| `shm-full` | 26.4 | 1200×900 drawn by CPU (200 sprites), `XShmPutImage` |
+| `shm-640` | 73.7 | 640×480 drawn by CPU (200 sprites), unscaled |
 
 What the numbers show:
-- **The blitter is fast per pixel but slow per request.** Each sprite blit costs
-  about 100 µs, no matter how small, so the limit is about 10 000 opaque or
-  7 500 alpha sprites per second. That is roughly 100–150 sprites per frame at
-  60 fps. The GP pays off for large areas: fills, scrolling, full-frame copies,
+- **Full-screen copies cost about 6 ms each** (about 180 Mpixel/s). A double-buffered,
+  scrolled 1200×900 frame needs two of them (ring/background → back buffer → window),
+  so about 12 ms. That alone caps the frame rate at about 80 fps.
+- **Small blits cost 25–55 µs each:** about 18 000 opaque `XCopyArea` sprites/s and
+  about 26 000 32×32 alpha composites/s (`copy1000` and `over1000`, after subtracting the
+  background). Alpha composites are cheaper than `XCopyArea`. After the 12 ms of
+  full-screen copies, a 60 fps frame has room for roughly 100–150 sprites.
+  The GP pays off for large areas: fills, scrolling, full-frame copies,
   big alpha-blended layers.
 - **Hardware scaling is only available through Xv.** XRender transforms fall back
-  to software (15.6 fps for the scaling alone, 0.8 fps bilinear). The Xv overlay
+  to software (about 20 fps for the scaling alone, under 1 fps bilinear). The Xv overlay
   scales 640×480 to 1200×900 for free. It also accepts RGB565 (`RV16`) besides YUV.
-- **Render 640×480 on the CPU and let Xv scale it.** That reaches 72 fps with 200
-  sprites in YV12, against 26.6 fps for drawing 1200×900 directly. RV16 costs
-  about 15% more than YV12 (2 bytes/pixel instead of 1.5) but keeps RGB drawing code.
+- **Render 640×480 on the CPU and let Xv scale it.** That reaches about 75 fps with
+  200 sprites, against 26 fps for drawing 1200×900 directly. RV16 and YV12 cost about
+  the same, so RGB565 drawing code can be kept.
   A GP-rendered pixmap cannot be fed to Xv: Xv takes images from client
   memory, and reading VRAM back runs at about 16 MB/s.
 - **The overlay is a separate plane** shown where the window holds the colour key.
   The demo fills the window with the key from `XV_COLORKEY`.
+
+### Tilemap demo
+
+`demos/tilemap.c` is a smooth-scrolling 2D tilemap. The world is a procedural
+128×128-tile torus with water, beach, grass, flowers, forest, rock and cobblestone
+paths. Glowing orbs (premultiplied alpha) drift over it, and the camera moves
+diagonally with a wobble. The same world is drawn two ways:
+
+| Mode | How |
+|---|---|
+| `blit` | Native 1200×900, 32×32 tiles in VRAM. A **wrap-around ring buffer** pixmap (1248×960, one tile larger than the screen) holds the visible tiles, so each frame only blits the newly exposed tiles (about 1–3). The visible region is copied to a back buffer in up to 4 blits (where the ring wraps). 48×48 alpha orbs are drawn with XRender Over, then the back buffer is copied to the window. |
+| `xv` | 640×480 in RAM, 16×16 tiles, the same ring-buffer scheme with `memcpy`. 24×24 orbs are alpha-blended by the CPU into RGB565, then `XvShmPutImage` RV16 is scaled to 1200×900 by the overlay. On screen the tiles are about 30 px and the orbs about 45 px, close to the blit mode. |
+
+```sh
+tilemap [-mode blit|xv|both] [-t seconds] [-n sprites] [-direct] [-nofilter] [-nofinish] [-profile] [-dump file.ppm]
+```
+
+Measured on the XO (6 s runs, about 44 orbs on screen with the default `-n 48`):
+
+| Run | fps |
+|---|---|
+| `blit` | **74.5** |
+| `blit -direct` (no back buffer: ring → window, orbs on the window; tears/flickers) | 114.0 |
+| `blit -n 150` (about 137 orbs on screen) | 60.7 |
+| `blit -n 0` | 86.7 |
+| `xv` | **80.6** |
+| `xv -n 150` | 51.1 |
+| `xv -n 0` | 114.9 |
+| `xv -nofilter` | 80.7 (the overlay filter is free) |
+
+`blit -profile` (one sync per phase, so slightly slower in total) shows where the
+frame goes: new tiles 0.5 ms, ring→back 6.1 ms, 43 orbs 2.5 ms, back→window 5.7 ms.
+Each 48×48 alpha orb costs about 33 µs (from the `-n 150` difference).
+
+- **Native blitting is a solid choice:** 60+ fps at full resolution with 130+ alpha
+  sprites. The client's own CPU work is small, but the CPU is not free: the X
+  server busy-waits on the GP. The two full-screen copies are the main cost. Drawing directly into the window
+  saves one copy but tears.
+- **Xv mode wins with few sprites and loses with many.** Here the CPU does all the
+  drawing and blending, and alpha blending in RGB565 costs about 77 µs per 24×24
+  orb (from the `-n 150` difference), more than twice the 33 µs of an alpha
+  composite in blit mode. In exchange there is a free filtered upscale and a 640×480 working resolution,
+  which suits pixel-art games.
+- `-dump` writes the last Xv frame as a PPM, because the overlay is not visible to
+  screenshots or `XGetImage`. The dumped frame was checked and looks right. The
+  overlay's on-screen colours (RV16 channel order) were not checked, since I cannot see the XO's display.
+
+### The XSync pitfall
+
+The Geode X driver queues GP commands in a 256 KB command buffer, and `XSync` returns
+once the **server** has processed the requests, not when the **GP** has executed
+them. With few commands per frame (tilemap: about 50), the buffer holds seconds of
+work. `tilemap -mode blit -nofinish` reports about 300 fps for the first seconds,
+then falls to the real 80 fps once the buffer is full. At that point the X server
+spins in user space waiting for buffer space: `vmstat` shows 93% user CPU, and
+earlier ~1000 context switches/s drop to ~190.
+
+Consequences:
+- **Benchmarks** must wait for the GP. Reading back one pixel (`XGetImage` 1×1) does
+  that, at a cost of a few percent.
+- **Games** must throttle the same way, once per frame. Otherwise input latency
+  can grow to seconds while the queue fills.
+- The first version of `x11-accel` used `XSync` and overstated the per-sprite costs.
+  The tables above were re-measured with `finish()`.
 
 `sdl-accel` (SDL 1.2.15, x11 driver), measured on the XO:
 
